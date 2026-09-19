@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -489,12 +489,66 @@ pub fn find_session_index_cleanup_blocking_processes() -> Vec<u32> {
     find_codex_processes()
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub fn find_codex_processes() -> Vec<u32> {
+    let Ok(output) = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    linux_codex_process_ids(
+        String::from_utf8_lossy(&output.stdout).lines(),
+        std::process::id(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_codex_process_ids<'a>(
+    process_lines: impl IntoIterator<Item = &'a str>,
+    current_process_id: u32,
+) -> Vec<u32> {
+    let mut ids = process_lines
+        .into_iter()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let process_id = parts.next()?.parse::<u32>().ok()?;
+            let _parent_process_id = parts.next()?.parse::<u32>().ok()?;
+            let args = parts.collect::<Vec<_>>().join(" ");
+            (process_id != current_process_id && is_linux_codex_main_process(&args))
+                .then_some(process_id)
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_codex_main_process(args: &str) -> bool {
+    let executable = args.split_whitespace().next().unwrap_or_default();
+    let executable_name = Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    matches!(
+        executable_name.to_ascii_lowercase().as_str(),
+        "chatgpt" | "codex"
+    ) && !args.contains("/resources/")
+        && !args.contains(" --type=")
+}
+
+#[cfg(target_os = "linux")]
+pub fn find_session_index_cleanup_blocking_processes() -> Vec<u32> {
+    find_codex_processes()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn find_codex_processes() -> Vec<u32> {
     Vec::new()
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn find_session_index_cleanup_blocking_processes() -> Vec<u32> {
     Vec::new()
 }
@@ -626,7 +680,14 @@ pub fn stop_launcher_processes_and_wait() {
     );
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub fn stop_launcher_processes_and_wait() {
+    terminate_linux_processes_and_wait(find_processes_by_executable_names(&[
+        crate::install::SILENT_BINARY,
+    ]));
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn stop_launcher_processes_and_wait() {}
 
 #[cfg(windows)]
@@ -636,7 +697,14 @@ pub fn stop_codex_processes() {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub fn stop_codex_processes() {
+    for process_id in find_codex_processes() {
+        let _ = terminate_linux_process(process_id);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn stop_codex_processes() {}
 
 #[cfg(target_os = "macos")]
@@ -665,7 +733,12 @@ pub fn stop_codex_processes_and_wait() {
     );
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub fn stop_codex_processes_and_wait() {
+    terminate_linux_processes_and_wait(find_codex_processes());
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn stop_codex_processes_and_wait() {}
 
 #[cfg(target_os = "macos")]
@@ -678,9 +751,88 @@ pub fn stop_codex_processes_for_debug_port_and_wait(debug_port: u16) {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn stop_codex_processes_for_debug_port_and_wait(_debug_port: u16) {
     stop_codex_processes_and_wait();
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn stop_codex_processes_for_debug_port_and_wait(_debug_port: u16) {
+    stop_codex_processes_and_wait();
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_linux_process(process_id: u32) -> std::io::Result<()> {
+    Command::new("kill")
+        .arg(process_id.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn find_processes_by_executable_names(names: &[&str]) -> Vec<u32> {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,args="]).output() else {
+        return Vec::new();
+    };
+    let current_process_id = std::process::id();
+    let mut ids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let process_id = parts.next()?.parse::<u32>().ok()?;
+            if process_id == current_process_id {
+                return None;
+            }
+            let args = parts.collect::<Vec<_>>();
+            let executable = args.first().copied().unwrap_or_default();
+            let executable_name = Path::new(executable)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            names
+                .iter()
+                .any(|name| executable_name.eq_ignore_ascii_case(name))
+                .then_some(process_id)
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_linux_processes_and_wait(process_ids: Vec<u32>) {
+    if process_ids.is_empty() {
+        return;
+    }
+    for process_id in &process_ids {
+        let _ = terminate_linux_process(*process_id);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(RESTART_STOP_WAIT_TIMEOUT_MS);
+    loop {
+        let remaining = process_ids_still_running(
+            &process_ids,
+            process_ids
+                .iter()
+                .copied()
+                .filter(|process_id| process_id_is_running(*process_id) == Some(true)),
+        );
+        if remaining.is_empty() || std::time::Instant::now() >= deadline {
+            if !remaining.is_empty() {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "watcher.linux_stop_wait_timeout",
+                    serde_json::json!({
+                        "remaining_process_ids": remaining,
+                        "timeout_ms": RESTART_STOP_WAIT_TIMEOUT_MS
+                    }),
+                );
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(RESTART_STOP_WAIT_INTERVAL_MS));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -896,4 +1048,42 @@ fn startup_shortcut_path() -> Option<PathBuf> {
             .join("Startup")
             .join(WATCHER_STARTUP_SHORTCUT_NAME)
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_process_tests {
+    use super::{is_linux_codex_main_process, linux_codex_process_ids};
+
+    #[test]
+    fn linux_process_filter_keeps_desktop_main_and_ignores_helpers() {
+        let lines = [
+            "100 1 /usr/lib/chatgpt/ChatGPT --remote-debugging-port=9229",
+            "101 100 /usr/lib/chatgpt/ChatGPT --type=renderer",
+            "102 100 /usr/lib/chatgpt/resources/crashpad_handler",
+            "103 1 /usr/bin/other-app",
+        ];
+
+        assert_eq!(linux_codex_process_ids(lines, 999), vec![100]);
+    }
+
+    #[test]
+    fn linux_process_filter_excludes_current_process() {
+        let lines = ["100 1 /usr/lib/chatgpt/ChatGPT"];
+
+        assert!(linux_codex_process_ids(lines, 100).is_empty());
+    }
+
+    #[test]
+    fn linux_main_process_detection_accepts_codex_names_only() {
+        assert!(is_linux_codex_main_process(
+            "/usr/lib/chatgpt/ChatGPT --foo"
+        ));
+        assert!(is_linux_codex_main_process("/opt/Codex --foo"));
+        assert!(!is_linux_codex_main_process(
+            "/usr/lib/chatgpt/resources/ChatGPT --foo"
+        ));
+        assert!(!is_linux_codex_main_process(
+            "/usr/lib/chatgpt/ChatGPT --type=renderer"
+        ));
+    }
 }
