@@ -23,6 +23,13 @@ test("uvx 预设不分平台", () => {
   assert.match(preset.tomlBody({ windows: false }), /^command = "uvx"$/m);
 });
 
+test("Linux Computer Use 预设使用 stdio MCP 入口", () => {
+  const preset = mcpPresetById("computer-use-linux");
+  assert.ok(preset);
+  assert.match(preset.tomlBody({ windows: false }), /^command = "codex-computer-use-linux"$/m);
+  assert.match(preset.tomlBody({ windows: false }), /^args = \["mcp"\]$/m);
+});
+
 test("预设的 TOML 表体只含表头之下的内容", () => {
   for (const preset of MCP_PRESETS) {
     for (const windows of [true, false]) {

@@ -33,6 +33,30 @@ Codex++ 是面向 OpenAI Codex / ChatGPT 桌面应用的外部启动器与管理
 
 首次使用建议先打开管理工具，确认应用路径和运行状态，再配置供应商与增强功能，最后从 `Codex++` 入口启动。Windows 安装包会创建桌面和开始菜单快捷方式；macOS DMG 会安装 `/Applications/Codex++.app` 和 `/Applications/Codex++ 管理工具.app`。
 
+### Linux Computer Use MCP
+
+Linux 用户可以构建仓库内置的 `codex-computer-use-linux` MCP 服务，并将它
+提供给支持本地 stdio MCP 的 ChatGPT/Codex 主机：
+
+```bash
+cargo build -p codex-computer-use-linux --release
+install -Dm755 target/release/codex-computer-use-linux \
+  "$HOME/.local/bin/codex-computer-use-linux"
+```
+
+启动 Linux 版 Codex++ 并应用供应商配置后，Codex++ 会自动把这个 MCP
+写入 `~/.codex/config.toml`，不需要手动配置：
+
+```toml
+[mcp_servers.computer-use-linux]
+command = "codex-computer-use-linux"
+args = ["mcp"]
+```
+
+它提供 Linux 截图、窗口检查、无障碍状态，以及经过主机审批的键盘/指针
+操作。该运行时仅支持 Linux，可能需要桌面 portal 或 GNOME 无障碍权限。
+Codex++ 会保留用户已有的同名配置，不会覆盖手动修改。
+
 ## 赞助商
 
 <p align="center">

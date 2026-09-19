@@ -58,6 +58,32 @@ Friendly link: <a href="https://linux.do">LINUX DO</a>
 
 Every UI enhancement is independently configurable. Disabling the global enhancement switch still leaves Codex++ available as a provider and launch manager.
 
+### Linux Computer Use MCP
+
+Linux users can build the vendored `codex-computer-use-linux` MCP server and
+use it from a ChatGPT/Codex host that supports local stdio MCP servers:
+
+```bash
+cargo build -p codex-computer-use-linux --release
+install -Dm755 target/release/codex-computer-use-linux \
+  "$HOME/.local/bin/codex-computer-use-linux"
+```
+
+After launching Codex++ on Linux and applying a provider configuration, Codex++
+automatically writes this MCP into `~/.codex/config.toml`; no manual MCP
+configuration is required:
+
+```toml
+[mcp_servers.computer-use-linux]
+command = "codex-computer-use-linux"
+args = ["mcp"]
+```
+
+It provides Linux screenshots, window inspection, accessibility state, and
+approved keyboard/pointer actions. The runtime is Linux-only and may require
+desktop portal or GNOME accessibility permissions. Codex++ preserves an
+existing user-defined entry with the same id.
+
 ## Provider Modes
 
 Official login, mixed API, and pure API are stored and switched separately:

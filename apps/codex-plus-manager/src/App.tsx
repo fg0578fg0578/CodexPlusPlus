@@ -85,6 +85,7 @@ import { codexGoalsFeatureState, setCodexGoalsFeatureInConfig } from "./goals-co
 import { isGitHubRepositoryHomepage } from "./github-repository";
 import { NativeBrowserStatusView, nativeBrowserConsent } from "./native-browser-settings";
 import { DEFAULT_AUTO_COMPACT_PERCENT, normalizeAutoCompactEditing, normalizeAutoCompactPercent } from "./auto-compact";
+import { MCP_PRESETS } from "./mcp-presets";
 import {
   clearModelMetadataForSlug,
   parseModelMetadataDocument,
@@ -8959,6 +8960,7 @@ function ContextEntryEditor({
   const [draftKind, setDraftKind] = useState<ContextKind>(entry?.kind ?? kind);
   const [id, setId] = useState(entry?.id ?? "");
   const [tomlBody, setTomlBody] = useState(entry?.tomlBody ?? "");
+  const [presetId, setPresetId] = useState("");
   const canSave = id.trim().length > 0;
 
   return (
@@ -8980,6 +8982,29 @@ function ContextEntryEditor({
             placeholder={t("例如 context7")}
           />
         </Field>
+        {draftKind === "mcp" && !entry ? (
+          <Field label={t("MCP 配置")}>
+            <AppSelect
+              value={presetId}
+              onChange={(value) => {
+                setPresetId(value);
+                if (!value) return;
+                const preset = MCP_PRESETS.find((candidate) => candidate.id === value);
+                if (!preset) return;
+                setId(preset.id);
+                setTomlBody(preset.tomlBody({ windows: isWindowsPlatform }));
+              }}
+              options={[
+                { value: "", label: t("不使用预设") },
+                ...MCP_PRESETS.map((preset) => ({
+                  value: preset.id,
+                  label: preset.name,
+                  title: preset.description,
+                })),
+              ]}
+            />
+          </Field>
+        ) : null}
       </div>
       <Field label={t("TOML 配置体")}>
         <Textarea

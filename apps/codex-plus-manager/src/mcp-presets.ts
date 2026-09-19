@@ -40,6 +40,14 @@ export interface McpPreset {
 
 export const MCP_PRESETS: McpPreset[] = [
   {
+    id: "computer-use-linux",
+    name: "codex-computer-use-linux",
+    description: "Linux 桌面控制 MCP：截图、窗口、无障碍树、键鼠输入和终端上下文。仅支持 Linux，需先构建并将二进制加入 PATH。",
+    tags: ["stdio", "linux", "desktop"],
+    homepage: "https://github.com/ilysenko/codex-desktop-linux",
+    tomlBody: () => 'command = "codex-computer-use-linux"\nargs = ["mcp"]\n',
+  },
+  {
     id: "fetch",
     name: "mcp-server-fetch",
     description: "抓取网页并转成适合模型阅读的文本。需要本机有 uvx（uv）。",

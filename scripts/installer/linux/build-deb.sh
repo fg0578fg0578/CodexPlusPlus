@@ -83,7 +83,10 @@ build_frontend() {
 build_rust() {
     echo ">>> 构建 Rust 二进制..."
     export PATH="$HOME/.cargo/bin:$PATH"
-    cargo build --release -p codex-plus-launcher -p codex-plus-manager
+    cargo build --release \
+        -p codex-plus-launcher \
+        -p codex-plus-manager \
+        -p codex-computer-use-linux
     echo ">>> Rust 构建完成"
 }
 
@@ -112,8 +115,10 @@ package_deb() {
     # ── 复制二进制 ──
     cp "$REPO_DIR/target/release/codex-plus-plus"          "$stage/bin/"
     cp "$REPO_DIR/target/release/codex-plus-plus-manager"  "$stage/bin/"
+    cp "$REPO_DIR/target/release/codex-computer-use-linux" "$stage/bin/"
     chmod 755 "$stage/bin/codex-plus-plus"
     chmod 755 "$stage/bin/codex-plus-plus-manager"
+    chmod 755 "$stage/bin/codex-computer-use-linux"
 
     # ── 复制前端资源 ──
     if [ -d "$PROJECT_DIR/dist" ]; then

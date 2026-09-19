@@ -5,6 +5,13 @@ members = [
   "crates/codex-plus-data",
   "apps/codex-plus-launcher",
   "apps/codex-plus-manager/src-tauri",
+  "tools/computer-use-linux",
+]
+default-members = [
+  "crates/codex-plus-core",
+  "crates/codex-plus-data",
+  "apps/codex-plus-launcher",
+  "apps/codex-plus-manager/src-tauri",
 ]
 
 [workspace.package]

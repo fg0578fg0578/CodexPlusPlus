@@ -1257,7 +1257,8 @@ fn write_codex_live_atomic(
 
     let config_text = match config_text {
         Some(config_text) => {
-            let config_text = preserve_live_app_settings(home, config_text)?;
+            let config_text = ensure_builtin_linux_computer_use_mcp(config_text)?;
+            let config_text = preserve_live_app_settings(home, &config_text)?;
             Some(preserve_live_marketplace_configs(home, &config_text)?)
         }
         None => None,
@@ -1305,6 +1306,77 @@ fn write_codex_live_atomic(
     }
 
     Ok(backup_path)
+}
+
+/// Add Codex++'s bundled Linux Computer Use MCP when the live config does not
+/// already define that server. User-authored entries remain authoritative.
+fn ensure_builtin_linux_computer_use_mcp(config_text: &str) -> anyhow::Result<String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Ok(config_text.to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        const SERVER_ID: &str = "computer-use-linux";
+        let mut doc = parse_toml_document(config_text)?;
+        let mcp_servers = if doc.as_table().contains_key("mcp_servers") {
+            match doc.get_mut("mcp_servers").and_then(Item::as_table_mut) {
+                Some(table) => table,
+                None => return Ok(config_text.to_string()),
+            }
+        } else {
+            doc["mcp_servers"] = toml_edit::table();
+            doc.get_mut("mcp_servers")
+                .and_then(Item::as_table_mut)
+                .expect("new mcp_servers table should be available")
+        };
+
+        if mcp_servers.contains_key(SERVER_ID) {
+            return Ok(config_text.to_string());
+        }
+
+        let command = builtin_linux_computer_use_binary();
+        let mut server = Table::new();
+        server["command"] = toml_edit::value(command);
+        let mut args = toml_edit::Array::new();
+        args.push("mcp");
+        server["args"] = Item::Value(toml_edit::Value::Array(args));
+        mcp_servers.insert(SERVER_ID, Item::Table(server));
+        Ok(normalize_optional_toml(doc))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn builtin_linux_computer_use_binary() -> String {
+    if let Some(path) = std::env::var_os("CODEX_COMPUTER_USE_LINUX_MCP_BINARY")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return path.to_string_lossy().to_string();
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let mut directory = exe.parent().map(Path::to_path_buf);
+        for _ in 0..3 {
+            let Some(path) = directory.take() else {
+                break;
+            };
+            let candidate = path.join("codex-computer-use-linux");
+            if candidate.is_file() {
+                return candidate.to_string_lossy().to_string();
+            }
+            directory = path.parent().map(Path::to_path_buf);
+        }
+    }
+
+    let system_binary = Path::new("/usr/bin/codex-computer-use-linux");
+    if system_binary.is_file() {
+        return system_binary.to_string_lossy().to_string();
+    }
+
+    "codex-computer-use-linux".to_string()
 }
 
 fn with_model_catalog_rollback<T>(
@@ -3542,6 +3614,35 @@ fn account_label_from_jwt(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn builtin_linux_computer_use_mcp_is_added_without_overwriting_user_config() {
+        let added = ensure_builtin_linux_computer_use_mcp("model = \"gpt-5\"\n").unwrap();
+        let doc = added.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["computer-use-linux"]["args"]
+                .as_array()
+                .and_then(|args| args.get(0))
+                .and_then(|value| value.as_str()),
+            Some("mcp")
+        );
+        assert!(
+            doc["mcp_servers"]["computer-use-linux"]["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("codex-computer-use-linux"))
+        );
+
+        let user_config = r#"
+[mcp_servers.computer-use-linux]
+command = "/custom/computer-use"
+args = ["custom"]
+"#;
+        assert_eq!(
+            ensure_builtin_linux_computer_use_mcp(user_config).unwrap(),
+            user_config
+        );
+    }
 
     /// 回归真实故障：`[mcp_servers.node_repl]`（带正确的 `.env` 子表）之后又混入
     /// 一个裸的空 `[mcp_servers]` 表头。行级去重会把两者当成互不相干的字符串，
