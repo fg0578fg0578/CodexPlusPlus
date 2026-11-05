@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -9,8 +10,16 @@ const source = await readFile(new URL("../../../scripts/installer/macos/package-
 const start = source.indexOf('DMG_WORK_DIR="$(mktemp');
 assert.ok(start >= 0, "the real DMG lifecycle must be exercised");
 const bash = process.platform === "win32"
-  ? join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe")
+  ? spawnSync("where.exe", ["bash.exe"], { encoding: "utf8" }).stdout
+      .split(/\r?\n/)
+      .find((path) => /\\Git\\(?:usr\\)?bin\\bash\.exe$/i.test(path))
+      ?? join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe")
   : "/bin/bash";
+const bashExists = existsSync(bash);
+const maybeTest = bashExists
+  ? test
+  : (name: string, fn: () => Promise<void> | void) =>
+      test(name, { skip: "Git Bash is required on Windows" }, fn);
 
 // Run the actual packaging tail with synthetic disk commands, never real mounts.
 const fixture = `
@@ -33,6 +42,11 @@ sleep() {
 rm() { :; }
 rmdir() { :; }
 osascript() { cat >/dev/null; }
+# sign_dmg / notarize_dmg 定义在脚本前半段，不在下面截取运行的片段里，
+# 所以这里必须提供存根。它们只在 SIGNING_IDENTITY 非空时才真正做事，
+# 本 fixture 不设置该变量，签名与公证的完整流程由 package-dmg.sh 自身负责。
+sign_dmg() { printf 'sign %s\\n' "$1" >> trace.log; }
+notarize_dmg() { printf 'notarize %s\\n' "$1" >> trace.log; }
 hdiutil() {
   printf '%s\\n' "$*" >> trace.log
   case "$1" in
@@ -100,7 +114,7 @@ async function runScenario(scenario: string) {
 }
 
 for (const scenario of ["success", "retry-convert", "late-convert", "delayed-output", "delayed", "already-gone", "force-only"]) {
-  test(`DMG packaging succeeds after ${scenario}`, async () => {
+  maybeTest(`DMG packaging succeeds after ${scenario}`, async () => {
     const result = await runScenario(scenario);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /out\/final\.dmg/);
@@ -115,24 +129,28 @@ for (const scenario of ["success", "retry-convert", "late-convert", "delayed-out
       assert.equal(result.trace.match(/^convert /gm)?.length, 1);
     }
     if (scenario === "delayed") {
+      // 普通 detach 失败后立刻补 -force：CI runner 上「卷已消失、设备仍注册」
+      // 的中间态只有 -force 能解，普通重试不会成功（见 detach_dmg 注释）。
       assert.equal(result.trace.match(/^detach /gm)?.length, 2);
-      assert.doesNotMatch(result.trace, /-force/);
+      assert.match(result.trace, /detach \/dev\/disk4 -force/);
     }
     if (scenario === "force-only") {
-      assert.equal(result.trace.match(/^detach /gm)?.length, 5);
+      // -force 在循环内，所以第 2 次 detach 就是 force，不再等到循环跑完。
+      assert.equal(result.trace.match(/^detach /gm)?.length, 2);
       assert.match(result.trace, /detach \/dev\/disk4 -force/);
     }
   });
 }
 
 for (const scenario of ["no-device", "no-volume"]) {
-  test(`DMG packaging cleans up failed attach parsing: ${scenario}`, async () => {
+  maybeTest(`DMG packaging cleans up failed attach parsing: ${scenario}`, async () => {
     const result = await runScenario(scenario);
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /failed to find mounted DMG device and volume/);
     assert.doesNotMatch(result.trace, /^convert /m);
     if (scenario === "no-device") {
-      assert.equal(result.trace.match(/^detach \/Volumes\/fixture$/gm)?.length, 2);
+      // 只有挂载点可清理（无设备），detach 一次即成功。
+      assert.equal(result.trace.match(/^detach \/Volumes\/fixture$/gm)?.length, 1);
     } else {
       assert.match(result.trace, /detach \/dev\/disk4/);
     }
@@ -140,7 +158,7 @@ for (const scenario of ["no-device", "no-volume"]) {
 }
 
 for (const scenario of ["fail-convert", "missing-output", "empty-output"]) {
-  test(`DMG packaging rejects ${scenario} instead of reporting create success`, async () => {
+  maybeTest(`DMG packaging rejects ${scenario} instead of reporting create success`, async () => {
     const result = await runScenario(scenario);
     assert.equal(result.status, 1, result.stderr);
     if (scenario === "fail-convert") {
@@ -155,7 +173,7 @@ for (const scenario of ["fail-convert", "missing-output", "empty-output"]) {
 }
 
 for (const scenario of ["busy", "info-error"]) {
-  test(`DMG packaging refuses conversion when detach is ${scenario}`, async () => {
+  maybeTest(`DMG packaging refuses conversion when detach is ${scenario}`, async () => {
     const result = await runScenario(scenario);
     assert.equal(result.status, 1, result.stderr);
     assert.doesNotMatch(result.trace, /^convert /m);

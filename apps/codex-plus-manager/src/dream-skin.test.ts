@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFile } from "node:fs/promises";
+import ts from "typescript";
 
 import {
   defaultDreamSkinTheme,
   isDreamSkinDraftDirty,
   normalizeDreamSkinTheme,
   resolveDreamSkinStylePreset,
+  runExclusiveDreamSkinInstall,
 } from "./dream-skin.ts";
 
 describe("dream skin theme helpers", () => {
@@ -36,6 +38,95 @@ describe("dream skin theme helpers", () => {
     assert.equal(resolveDreamSkinStylePreset("preset-cyber-neon", undefined), "cyber-neon");
     assert.equal(resolveDreamSkinStylePreset("codex-snow-skin", "dream-original"), "codex-snow");
     assert.equal(resolveDreamSkinStylePreset("custom-theme", undefined), "dream-original");
+  });
+
+  it("locks theme installation synchronously and releases the lock after completion", async () => {
+    const lock = { current: false };
+    const pending: boolean[] = [];
+    let finish!: (value: boolean) => void;
+    let runs = 0;
+    const task = () => {
+      runs += 1;
+      return new Promise<boolean>((resolve) => { finish = resolve; });
+    };
+
+    const first = runExclusiveDreamSkinInstall(lock, (value) => pending.push(value), task);
+    const duplicate = await runExclusiveDreamSkinInstall(lock, (value) => pending.push(value), task);
+
+    assert.equal(duplicate, null);
+    assert.equal(runs, 1);
+    assert.equal(lock.current, true);
+    assert.deepEqual(pending, [true]);
+
+    finish(true);
+    assert.equal(await first, true);
+    assert.equal(lock.current, false);
+    assert.deepEqual(pending, [true, false]);
+  });
+
+  it("releases the theme installation lock when the request throws", async () => {
+    const lock = { current: false };
+    const pending: boolean[] = [];
+
+    await assert.rejects(
+      runExclusiveDreamSkinInstall(lock, (value) => pending.push(value), async () => {
+        throw new Error("network failed");
+      }),
+      /network failed/,
+    );
+
+    assert.equal(lock.current, false);
+    assert.deepEqual(pending, [true, false]);
+  });
+
+  it("keeps the real task locked when the initiating view unmounts and remounts", async () => {
+    const appLock = { current: false };
+    let runs = 0;
+    let finish!: (value: boolean) => void;
+    const task = () => {
+      runs += 1;
+      return new Promise<boolean>((resolve) => { finish = resolve; });
+    };
+    const mountView = () => () => runExclusiveDreamSkinInstall(appLock, () => {}, task);
+
+    const firstView = mountView();
+    const activeTask = firstView();
+    const remountedView = mountView();
+    const duplicate = await remountedView();
+
+    assert.equal(duplicate, null);
+    assert.equal(runs, 1);
+    assert.equal(appLock.current, true);
+
+    finish(true);
+    assert.equal(await activeTask, true);
+    assert.equal(appLock.current, false);
+  });
+
+  it("keeps global indeterminate install state across theme views and every install entry", async () => {
+    const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    assert.match(app, /const \[dreamSkinInstallOperation, setDreamSkinInstallOperation\] = useState<DreamSkinInstallOperation \| null>\(null\)/);
+    assert.match(app, /const dreamSkinInstallLockRef = useRef\(false\)/);
+    assert.match(app, /runExclusiveDreamSkinInstall\([\s\S]*dreamSkinInstallLockRef,[\s\S]*setDreamSkinInstallOperation/);
+    for (const source of ["market", "community", "pending-community", "import"]) {
+      assert.match(app, new RegExp(`source: "${source}"`));
+    }
+    assert.doesNotMatch(app, /const installLock = useRef\(false\)/);
+    assert.match(app, /const installing = installOperation\?\.source === "market"/);
+    assert.match(app, /const installing = installOperation\?\.source === "community"/);
+    assert.match(app, /disabled=\{installBlocked\}/);
+    assert.match(app, /disabled=\{installBlocked \|\| !theme\.applyCompatible\}/);
+    assert.match(app, /aria-busy=\{installing\}/);
+    assert.match(app, /installOperation=\{dreamSkinInstallOperation\}/);
+    assert.match(app, /DreamSkinInstallProgress label=\{dreamSkinInstallOperationLabel\(installOperation\)\}/);
+    assert.match(app, /installPending=\{dreamSkinInstallOperation\?\.source === "pending-community"\}/);
+    // 导入主题包在「我的主题」工具条上，安装进行中同样禁用。
+    assert.match(app, /disabled=\{Boolean\(installOperation\)\} onClick=\{\(\) => void actions\.importDreamSkinThemePackage\(\)\}/);
+    assert.match(app, /className="dream-skin-install-progress-bar" role="progressbar"/);
+    assert.doesNotMatch(app, /dream-skin-install-progress-bar[^>]*aria-valuenow/);
+    assert.match(css, /\.dream-skin-install-progress-bar > div\s*\{[^}]*animation:\s*task-progress-indeterminate/s);
   });
 
   it("runs the unmodified target renderers instead of the rewritten theme packages", async () => {
@@ -136,10 +227,19 @@ describe("dream skin theme helpers", () => {
     assert.match(renderer, /data-ds-part/);
     assert.match(renderer, /MutationObserver/);
     assert.match(compatibility, /main\[class\*="_MainContentSurface_"\]/);
+    // 适配层先按属性找主内容区（与上游 shell-main 契约一致），类名只做兜底（#2893）。
+    const ensureMain = compatibility.match(/function ensureDreamSkinMainSurface\(\) \{[^]*?\n  \}/)?.[0] ?? "";
+    assert.ok(
+      ensureMain.indexOf("main[data-app-shell-main-surface]") > -1
+        && ensureMain.indexOf("main[data-app-shell-main-surface]") < ensureMain.indexOf("_MainContentSurface_"),
+      "先认 data-app-shell-main-surface，再认类名",
+    );
     assert.match(compatibility, /shellMain\.classList\.add\("main-surface"\)/);
     assert.match(compatibility, /data-codex-plus-dream-skin-main-surface/);
     assert.match(compatibility, /clearDreamSkinMainSurfaceCompatibility\(\)/);
-    assert.match(assets, /DREAM_SKIN_RENDERER_REVISION: &str = "24-home-composer-rounded"/);
+    assert.match(assets, /DREAM_SKIN_RENDERER_REVISION: &str = "27-dream-skin-1.5.20-wallpaper-shell"/);
+    assert.match(assets, /DREAM_SKIN_COMMUNITY_COMPAT_CSS/);
+    assert.match(assets, /format!\("\{compiled\}\\n\{DREAM_SKIN_COMMUNITY_COMPAT_CSS\}"\)/);
   });
 
   it("covers the current shell, composer, message, and top-fade contracts", async () => {
@@ -215,7 +315,7 @@ describe("dream skin theme helpers", () => {
       "项目按钮文字",
       "状态文字",
       "引用文字",
-      "应用皮肤",
+      "应用所选主题",
       "恢复 Codex 外观",
       "实机验证",
       "保存截图",
@@ -279,25 +379,49 @@ describe("dream skin theme helpers", () => {
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.dream-skin-theme-list\s*\{[^}]*grid-template-columns:\s*1fr/s);
   });
 
-  it("keeps advanced theme editing collapsed outside the theme switcher", async () => {
+  it("keeps advanced editing collapsed with one explicit theme activation action", async () => {
     const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
-    const customizerStart = app.indexOf('<details className="dream-skin-customizer">');
-    const customizerEnd = app.indexOf("</details>", customizerStart);
-    const libraryStart = app.indexOf('<section className="dream-skin-theme-library">');
-    const libraryEnd = app.indexOf("</section>", libraryStart);
+    const source = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const screen = source.statements.find((node): node is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(node) && node.name?.text === "DreamSkinScreen",
+    );
+    assert.ok(screen);
 
-    assert.ok(customizerStart >= 0);
-    assert.ok(customizerEnd > customizerStart);
-    assert.ok(libraryStart >= 0);
-    assert.ok(libraryEnd > libraryStart);
+    // 用 JSX 结构定位完整区域，避免新增嵌套 details 后截在第一个结束标签。
+    const elements = new Map<string, ts.JsxElement>();
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxElement(node)) {
+        const className = node.openingElement.attributes.properties.find((attribute) =>
+          ts.isJsxAttribute(attribute) && attribute.name.getText(source) === "className",
+        );
+        if (className && ts.isJsxAttribute(className) && className.initializer && ts.isStringLiteral(className.initializer)) {
+          for (const name of className.initializer.text.split(/\s+/)) elements.set(name, node);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(screen);
+    const customizerNode = elements.get("dream-skin-customizer");
+    const libraryNode = elements.get("dream-skin-theme-library");
+    const overviewNode = elements.get("dream-skin-overview");
+    assert.ok(customizerNode);
+    assert.ok(libraryNode);
+    assert.ok(overviewNode);
+    const customizer = customizerNode.getText(source);
+    const library = libraryNode.getText(source);
+    const overview = overviewNode.getText(source);
 
-    const customizer = app.slice(customizerStart, customizerEnd);
-    const library = app.slice(libraryStart, libraryEnd);
-
-    assert.doesNotMatch(app.slice(customizerStart, customizerStart + 80), /\sopen(?:=|\s|>)/);
-    assert.match(library, /应用主题/);
+    assert.doesNotMatch(customizerNode.openingElement.getText(source), /\sopen(?:=|\s|>)/);
+    assert.match(overview, /应用所选主题/);
+    assert.match(overview, /actions\.activateDreamSkinTheme\(\)/);
+    assert.equal((screen.getText(source).match(/actions\.activateDreamSkinTheme\(\)/g) ?? []).length, 1);
+    assert.match(library, /actions\.selectDreamSkinTheme\(item\)/);
+    assert.doesNotMatch(library, /actions\.activateDreamSkinTheme\(\)/);
     assert.doesNotMatch(library, /t\("(?:从图片创建|保存主题|恢复 Dream Skin 默认主题)"\)/);
-    assert.match(customizer, /t\("从图片创建"\)/);
+    // 「从图片创建」只在主题库工具条上放一处（主操作），自定义区不再重复。
+    const toolbar = screen.getText(source).slice(screen.getText(source).indexOf("<CxToolbar onQuery={setLocalQuery}"));
+    assert.match(toolbar.slice(0, toolbar.indexOf("</CxToolbar>")), /t\("从图片创建"\)/);
+    assert.doesNotMatch(customizer, /t\("从图片创建"\)/);
     assert.match(customizer, /t\("保存主题"\)/);
     assert.match(customizer, /t\("恢复 Dream Skin 默认主题"\)/);
     assert.match(customizer, /t\("恢复 Codex 默认配色"\)/);
@@ -326,6 +450,26 @@ describe("dream skin theme helpers", () => {
     assert.match(app, /onInstalled=\{\(\) => setThemeView\("local"\)\}/);
     assert.match(css, /\.dream-skin-market-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,/s);
     assert.match(css, /\.dream-skin-market-preview\s*\{[^}]*aspect-ratio:\s*16 \/ 9/s);
+  });
+
+  it("shows a loading spinner instead of 0 while theme lists are loading", async () => {
+    const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    assert.match(app, /dreamSkinLibraryLoading/);
+    assert.match(app, /dreamSkinMarketLoading/);
+    assert.match(app, /dreamSkinCommunityLoading/);
+    // tab 计数在加载中渲染转圈图标，而不是渲染 0
+    assert.match(app, /libraryPending \? <Loader2[^/]*className="h-3 w-3 animate-spin" \/> : libraryCount/);
+    assert.match(app, /communityPending \? <Loader2[^/]*className="h-3 w-3 animate-spin" \/> : communityCount/);
+    assert.match(app, /marketPending \? <Loader2[^/]*className="h-3 w-3 animate-spin" \/> : marketCount/);
+    assert.doesNotMatch(app, /<span>\{library\?\.themes\.length \?\? 0\}<\/span>/);
+    assert.doesNotMatch(app, /<span>\{community\?\.items\.length \?\? 0\}<\/span>/);
+    assert.doesNotMatch(app, /<span>\{market\?\.themes\.length \?\? 0\}<\/span>/);
+    // 各区块的加载文案也带转圈
+    assert.match(app, /className="dream-skin-loading" role="status"/);
+    assert.match(css, /\.dream-skin-view-tabs button > span\.is-loading/);
+    assert.match(css, /\.dream-skin-loading\s*\{/);
   });
 
   it("allows the webview to load managed theme images only", async () => {
